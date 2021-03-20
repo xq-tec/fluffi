@@ -1,20 +1,17 @@
 // Copyright (C) 2021 xq-Tec GmbH
 
-// Chunk layout:
-// Option<NonNull<u8>>: previous chunk
-// usize: chunk allocation size
-
 use std::alloc;
 use std::cell::Cell;
 use std::mem::{align_of, size_of};
 use std::ptr::null_mut;
-use std::str::from_utf8_unchecked;
+use std::str::from_utf8_unchecked_mut;
 
 use crate::{MapEntry, RawValue};
 
 #[derive(Copy, Clone)]
 #[repr(C)]
 struct ChunkHeader {
+    /// Start of previous
     prev_chunk: *mut ChunkHeader,
     /// Total size of allocated memory (including header).
     alloc_size: usize,
@@ -45,6 +42,9 @@ pub struct Arena {
 }
 
 impl Arena {
+    /// Constructs a new, empty arena.
+    ///
+    /// No memory is allocated, so this operation is very cheap.
     pub fn new() -> Arena {
         // Check that the ChunkHeader will be sufficiently aligned in our allocation,
         // and that the size of a ChunkHeader is an integer multiple of ALIGNMENT.
@@ -63,6 +63,7 @@ impl Arena {
         }
     }
 
+    /// Constructs a new arena with at least `cap` free bytes pre-allocated.
     pub fn with_capacity(cap: usize) -> Arena {
         let inst = Arena::new();
         if cap > 0 {
@@ -71,11 +72,28 @@ impl Arena {
         inst
     }
 
+    /// Sets the minimum capacity of new memory chunks.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cap` is zero.
     pub fn set_default_capacity(&self, cap: usize) {
         assert!(cap > 0, "Arena default capacity cannot be zero");
         self.default_capacity.set(cap);
     }
 
+    /// Resets the arena.
+    ///
+    /// All memory chunks are freed, except for the first one, which is marked as free.
+    /// This is useful, for example, when slices are allocated and released in a loop.
+    /// By calling `reset()` between iterations, the amortized number of memory allocations
+    /// per iteration is effectively zero if the first chunk is large enough;
+    /// see [`with_capacity`].
+    ///
+    /// [`with_capacity`]: Arena::with_capacity
+    ///
+    /// The compiler ensures that this method can only be called once there are
+    /// no more live references to slices allocated in this arena.
     pub fn reset(&mut self) {
         let mut chunk = self.curr_chunk.get();
         if chunk.is_null() {
@@ -95,36 +113,42 @@ impl Arena {
         }
     }
 
-    pub fn bytes<'a>(&'a self, b: &[u8]) -> &'a [u8] {
+    /// Allocates and copies the given slice.
+    pub fn bytes<'a>(&'a self, b: &[u8]) -> &'a mut [u8] {
         let ptr = self.alloc(b.len() * size_of::<u8>());
         unsafe {
             ptr.copy_from_nonoverlapping(b.as_ptr(), b.len());
-            std::slice::from_raw_parts(ptr, b.len())
+            std::slice::from_raw_parts_mut(ptr, b.len())
         }
     }
 
-    pub fn string<'a>(&'a self, s: &str) -> &'a str {
-        unsafe { from_utf8_unchecked(self.bytes(s.as_bytes())) }
+    /// Allocates and copies the given string.
+    pub fn string<'a>(&'a self, s: &str) -> &'a mut str {
+        unsafe { from_utf8_unchecked_mut(self.bytes(s.as_bytes())) }
     }
 
-    pub fn array<'a, 'b>(&'a self, items: &[RawValue<'b>]) -> &'a [RawValue<'b>] {
+    /// Allocates and copies the given slice.
+    pub fn array<'a, 'b>(&'a self, items: &[RawValue<'b>]) -> &'a mut [RawValue<'b>] {
         let ptr = self.alloc(items.len() * size_of::<RawValue>()) as *mut RawValue;
         debug_assert_eq!(ptr as usize % align_of::<RawValue>(), 0);
         unsafe {
             ptr.copy_from_nonoverlapping(items.as_ptr(), items.len());
-            std::slice::from_raw_parts(ptr, items.len())
+            std::slice::from_raw_parts_mut(ptr, items.len())
         }
     }
 
-    pub fn map<'a, 'b>(&'a self, entries: &[MapEntry<'b>]) -> &'a [MapEntry<'b>] {
+    /// Allocates and copies the given slice.
+    pub fn map<'a, 'b>(&'a self, entries: &[MapEntry<'b>]) -> &'a mut [MapEntry<'b>] {
         let ptr = self.alloc(entries.len() * size_of::<MapEntry>()) as *mut MapEntry;
         debug_assert_eq!(ptr as usize % align_of::<MapEntry>(), 0);
         unsafe {
             ptr.copy_from_nonoverlapping(entries.as_ptr(), entries.len());
-            std::slice::from_raw_parts(ptr, entries.len())
+            std::slice::from_raw_parts_mut(ptr, entries.len())
         }
     }
 
+    /// Reserves `size` bytes in the arena, aligned to `ALIGNMENT`,
+    /// and returns a pointer to the memory area.
     fn alloc(&self, size: usize) -> *mut u8 {
         // Round up size to nearest multiple of ALIGNMENT
         let size = round_up(size);
@@ -140,9 +164,11 @@ impl Arena {
         ptr
     }
 
-    fn create_chunk(&self, size: usize) {
-        assert!(size <= usize::MAX - HEADER_SIZE);
-        let alloc_size = size + HEADER_SIZE;
+    /// Allocates a new memory chunk with at least `cap` free bytes,
+    /// initializes its header, and appends it to the chunk chain.
+    fn create_chunk(&self, cap: usize) {
+        assert!(cap <= usize::MAX - HEADER_SIZE);
+        let alloc_size = cap + HEADER_SIZE;
 
         let layout = alloc::Layout::from_size_align(alloc_size, ALIGNMENT).unwrap();
         let (ptr, header_ptr);
@@ -163,7 +189,7 @@ impl Arena {
 
         self.curr_chunk.set(header_ptr);
         self.write_ptr.set(ptr.wrapping_add(HEADER_SIZE));
-        self.curr_free.set(size);
+        self.curr_free.set(cap);
     }
 }
 
@@ -176,6 +202,7 @@ impl Drop for Arena {
     }
 }
 
+/// Rounds `n` up to be a multiple of `ALIGNMENT`.
 fn round_up(n: usize) -> usize {
     (n + (ALIGNMENT - 1)) & !(ALIGNMENT - 1)
 }
@@ -193,6 +220,7 @@ mod tests {
             headers.push(header);
             chunk_ptr = header.prev_chunk;
         }
+        headers.reverse();
         headers
     }
 
@@ -371,7 +399,7 @@ mod tests {
         let num_free_1 = arena.curr_free.get();
         assert_eq!(chunk_size - HEADER_SIZE - ALIGNMENT, num_free_1,);
 
-        // Reserve almost all of the remaining chunk
+        // Allocate almost all of the remaining chunk
         let x2: Box<[u8]> = (0..(num_free_1 - ALIGNMENT - ALIGNMENT / 2))
             .map(|i| (i * 3) as u8)
             .collect();
@@ -381,7 +409,7 @@ mod tests {
         let num_free_2 = ALIGNMENT;
         assert_eq!(arena.curr_free.get(), num_free_2);
 
-        // Reserve a little more memory than is left in chunk
+        // Allocate a little more memory than is left in chunk
         let x3: Box<[u8]> = (0..(ALIGNMENT + 1)).map(|i| (i * 5) as u8).collect();
         let y3 = arena.bytes(&x3);
         let headers = header_list(&arena);
@@ -389,7 +417,7 @@ mod tests {
         let num_free_3 = arena.default_capacity.get() - 2 * ALIGNMENT;
         assert_eq!(arena.curr_free.get(), num_free_3);
 
-        // Reserve exactly as much memory as is left in chunk
+        // Allocate exactly as much memory as is left in chunk
         let x4: Box<[u8]> = (0..num_free_3).map(|i| (i * 7) as u8).collect();
         let y4 = arena.bytes(&x4);
         let headers = header_list(&arena);
@@ -405,7 +433,7 @@ mod tests {
         let num_free_5 = arena.default_capacity.get() - ALIGNMENT;
         assert_eq!(arena.curr_free.get(), num_free_5);
 
-        // Check that old allocations didn't get overwritten
+        // Check that old  didn't get overwritten
         assert_eq!(y1, x1);
         assert_eq!(y2, &*x2);
         assert_eq!(y3, &*x3);
