@@ -49,16 +49,8 @@ impl<'a1, 'b1, 'a2, 'b2> cmp::PartialEq<Map<'a2, 'b2>> for Map<'a1, 'b1> {
             false
         } else {
             use std::collections::HashMap;
-            let lhs: HashMap<_, _> = self
-                .entries
-                .iter()
-                .map(|e| (e.key, e.value))
-                .collect();
-            let rhs: HashMap<_, _> = other
-                .entries
-                .iter()
-                .map(|e| (e.key, e.value))
-                .collect();
+            let lhs: HashMap<_, _> = self.entries.iter().map(|e| (e.key, e.value)).collect();
+            let rhs: HashMap<_, _> = other.entries.iter().map(|e| (e.key, e.value)).collect();
             lhs == rhs
         }
     }

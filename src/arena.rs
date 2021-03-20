@@ -2,11 +2,11 @@
 
 use std::alloc;
 use std::cell::Cell;
-use std::mem::{align_of, size_of};
+use std::mem::{align_of, size_of, ManuallyDrop};
 use std::ptr::null_mut;
 use std::str::from_utf8_unchecked_mut;
 
-use crate::{MapEntry, RawValue};
+use crate::{MapEntry, RawString, RawValue, Value};
 
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -113,37 +113,32 @@ impl Arena {
         }
     }
 
-    /// Allocates and copies the given slice.
+    /// Allocates and copies the given byte slice.
     pub fn bytes<'a>(&'a self, b: &[u8]) -> &'a mut [u8] {
-        let ptr = self.alloc(b.len() * size_of::<u8>());
-        unsafe {
-            ptr.copy_from_nonoverlapping(b.as_ptr(), b.len());
-            std::slice::from_raw_parts_mut(ptr, b.len())
-        }
+        self.slice(b)
     }
 
     /// Allocates and copies the given string.
     pub fn string<'a>(&'a self, s: &str) -> &'a mut str {
-        unsafe { from_utf8_unchecked_mut(self.bytes(s.as_bytes())) }
+        unsafe { from_utf8_unchecked_mut(self.slice(s.as_bytes())) }
     }
 
-    /// Allocates and copies the given slice.
+    /// Allocates and copies the given `RawValue` slice.
     pub fn array<'a, 'b>(&'a self, items: &[RawValue<'b>]) -> &'a mut [RawValue<'b>] {
-        let ptr = self.alloc(items.len() * size_of::<RawValue>()) as *mut RawValue;
-        debug_assert_eq!(ptr as usize % align_of::<RawValue>(), 0);
-        unsafe {
-            ptr.copy_from_nonoverlapping(items.as_ptr(), items.len());
-            std::slice::from_raw_parts_mut(ptr, items.len())
-        }
+        self.slice(items)
     }
 
-    /// Allocates and copies the given slice.
+    /// Allocates and copies the given `MapEntry` slice.
     pub fn map<'a, 'b>(&'a self, entries: &[MapEntry<'b>]) -> &'a mut [MapEntry<'b>] {
-        let ptr = self.alloc(entries.len() * size_of::<MapEntry>()) as *mut MapEntry;
-        debug_assert_eq!(ptr as usize % align_of::<MapEntry>(), 0);
+        self.slice(entries)
+    }
+
+    fn slice<'a, T: Copy>(&'a self, src: &[T]) -> &'a mut [T] {
+        assert!(align_of::<T>() <= ALIGNMENT);
+        let ptr = self.alloc(src.len() * size_of::<T>()) as *mut T;
         unsafe {
-            ptr.copy_from_nonoverlapping(entries.as_ptr(), entries.len());
-            std::slice::from_raw_parts_mut(ptr, entries.len())
+            ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
+            std::slice::from_raw_parts_mut(ptr, src.len())
         }
     }
 
@@ -161,6 +156,7 @@ impl Arena {
         let ptr = self.write_ptr.get();
         self.write_ptr.set(self.write_ptr.get().wrapping_add(size));
         self.curr_free.set(self.curr_free.get() - size);
+        debug_assert_eq!(ptr as usize % ALIGNMENT, 0);
         ptr
     }
 
@@ -196,6 +192,97 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         let mut chunk = self.curr_chunk.get();
+        while !chunk.is_null() {
+            chunk = unsafe { destroy_chunk(chunk) };
+        }
+    }
+}
+
+#[repr(C)]
+pub struct OwnedValue {
+    last_chunk: *mut ChunkHeader,
+    value: RawValue<'static>,
+}
+
+impl OwnedValue {
+    pub fn new<F>(f: F) -> OwnedValue
+    where
+        F: for<'a> FnOnce(&'a Arena) -> Option<Value<'a>>,
+    {
+        let arena = Arena::new();
+        let raw_value = RawValue::new(f(&arena));
+        let value_static = unsafe { std::mem::transmute::<_, RawValue<'static>>(raw_value) };
+        let arena = ManuallyDrop::new(arena);
+        OwnedValue {
+            last_chunk: arena.curr_chunk.get(),
+            value: value_static,
+        }
+    }
+
+    pub fn value(&self) -> Option<Value<'_>> {
+        self.raw_value().unpack()
+    }
+
+    pub fn raw_value<'a>(&'a self) -> RawValue<'a> {
+        unsafe { std::mem::transmute(self.value) }
+    }
+}
+
+impl Drop for OwnedValue {
+    fn drop(&mut self) {
+        let mut chunk = self.last_chunk;
+        while !chunk.is_null() {
+            chunk = unsafe { destroy_chunk(chunk) };
+        }
+    }
+}
+
+#[repr(C)]
+pub struct OwnedKeyValue {
+    last_chunk: *mut ChunkHeader,
+    key: RawString<'static>,
+    value: RawValue<'static>,
+}
+
+impl OwnedKeyValue {
+    pub fn new<F>(f: F) -> OwnedKeyValue
+    where
+        F: for<'a> FnOnce(&'a Arena) -> (&'a str, Option<Value<'a>>),
+    {
+        let arena = Arena::new();
+        let (key, value) = f(&arena);
+        let raw_key = RawString::new(key);
+        let raw_value = RawValue::new(value);
+        let key_static = unsafe { std::mem::transmute::<_, RawString<'static>>(raw_key) };
+        let value_static = unsafe { std::mem::transmute::<_, RawValue<'static>>(raw_value) };
+        let arena = ManuallyDrop::new(arena);
+        OwnedKeyValue {
+            last_chunk: arena.curr_chunk.get(),
+            key: key_static,
+            value: value_static,
+        }
+    }
+
+    pub fn key(&self) -> &'_ str {
+        self.raw_key().into()
+    }
+
+    pub fn value(&self) -> Option<Value<'_>> {
+        self.raw_value().unpack()
+    }
+
+    pub fn raw_key<'a>(&'a self) -> RawString<'a> {
+        unsafe { std::mem::transmute(self.key) }
+    }
+
+    pub fn raw_value<'a>(&'a self) -> RawValue<'a> {
+        unsafe { std::mem::transmute(self.value) }
+    }
+}
+
+impl Drop for OwnedKeyValue {
+    fn drop(&mut self) {
+        let mut chunk = self.last_chunk;
         while !chunk.is_null() {
             chunk = unsafe { destroy_chunk(chunk) };
         }
