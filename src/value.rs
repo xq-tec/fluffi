@@ -5,12 +5,12 @@ use std::fmt;
 use crate::map::{Map, MapEntry};
 use crate::raw::RawValue;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum Value<'a> {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Blob(&'a [u8]),
+    Bytes(&'a [u8]),
     String(&'a str),
     Array(&'a [RawValue<'a>]),
     Map(Map<'a, 'a>),
@@ -55,13 +55,13 @@ impl<'a> Value<'a> {
         }
     }
 
-    pub const fn is_blob(self) -> bool {
-        matches!(self, Value::Blob(_))
+    pub const fn is_bytes(self) -> bool {
+        matches!(self, Value::Bytes(_))
     }
 
-    pub const fn blob(self) -> Option<&'a [u8]> {
+    pub const fn bytes(self) -> Option<&'a [u8]> {
         match self {
-            Value::Blob(b) => Some(b),
+            Value::Bytes(b) => Some(b),
             Value::String(s) => Some(s.as_bytes()),
             _ => None,
         }
@@ -139,7 +139,7 @@ impl<'a> From<f64> for Value<'a> {
 
 impl<'a> From<&'a [u8]> for Value<'a> {
     fn from(b: &'a [u8]) -> Value<'a> {
-        Value::Blob(b)
+        Value::Bytes(b)
     }
 }
 
@@ -238,7 +238,7 @@ impl<'a> fmt::Debug for Value<'a> {
             Bool(v) => f.write_str(if *v { "true" } else { "false" }),
             Int(v) => f.write_fmt(format_args!("{}", v)),
             Float(v) => f.write_fmt(format_args!("{}", v)),
-            Blob(v) => f.write_fmt(format_args!("{:02x?}", v)),
+            Bytes(v) => f.write_fmt(format_args!("{:02x?}", v)),
             String(v) => f.write_fmt(format_args!("{}", v)),
             Array(v) => f.debug_list().entries(v.iter()).finish(),
             Map(v) => v.fmt(f),

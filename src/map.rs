@@ -1,5 +1,6 @@
 // Copyright (C) 2021 xq-Tec GmbH
 
+use std::cmp;
 use std::fmt;
 
 use crate::{RawString, RawValue, Value};
@@ -39,6 +40,27 @@ impl<'a, 'b> fmt::Debug for Map<'a, 'b> {
                     .map(|entry| (entry.key(), entry.value())),
             )
             .finish()
+    }
+}
+
+impl<'a1, 'b1, 'a2, 'b2> cmp::PartialEq<Map<'a2, 'b2>> for Map<'a1, 'b1> {
+    fn eq(&self, other: &Map) -> bool {
+        if self.len() != other.len() {
+            false
+        } else {
+            use std::collections::HashMap;
+            let lhs: HashMap<_, _> = self
+                .entries
+                .iter()
+                .map(|e| (e.key, e.value))
+                .collect();
+            let rhs: HashMap<_, _> = other
+                .entries
+                .iter()
+                .map(|e| (e.key, e.value))
+                .collect();
+            lhs == rhs
+        }
     }
 }
 
@@ -110,7 +132,7 @@ impl<'a, 'b> DoubleEndedIterator for MapIterator<'a, 'b> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 #[repr(C)]
 pub struct MapEntry<'a> {
     key: RawString<'a>,

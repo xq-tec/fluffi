@@ -1,5 +1,6 @@
 // Copyright (C) 2021 xq-Tec GmbH
 
+use std::cmp;
 use std::fmt;
 
 use crate::{Map, MapEntry, Value};
@@ -13,13 +14,13 @@ enum RawValueKind {
     Bool = 1,
     Int = 2,
     Float = 3,
-    Blob = 4,
+    Bytes = 4,
     String = 5,
     Array = 6,
     Map = 7,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 struct Metadata(u64);
 
@@ -89,8 +90,8 @@ impl<'a> RawValue<'a> {
                 md: Metadata::new(RawValueKind::Float),
                 payload: RawValuePayload { float_v },
             },
-            Blob(b) => RawValue {
-                md: Metadata::with_len(RawValueKind::Blob, b.len()),
+            Bytes(b) => RawValue {
+                md: Metadata::with_len(RawValueKind::Bytes, b.len()),
                 payload: RawValuePayload { bytes: b.as_ptr() },
             },
             String(s) => RawValue {
@@ -116,9 +117,9 @@ impl<'a> RawValue<'a> {
             RawValueKind::Bool => Some(Value::Bool(unsafe { self.payload.bool_v })),
             RawValueKind::Int => Some(Value::Int(unsafe { self.payload.int_v })),
             RawValueKind::Float => Some(Value::Float(unsafe { self.payload.float_v })),
-            RawValueKind::Blob => unsafe {
+            RawValueKind::Bytes => unsafe {
                 let len = self.md.len();
-                Some(Value::Blob(std::slice::from_raw_parts(
+                Some(Value::Bytes(std::slice::from_raw_parts(
                     self.payload.bytes,
                     len,
                 )))
@@ -150,11 +151,21 @@ impl<'a> RawValue<'a> {
     }
 }
 
+unsafe impl<'a> Send for RawValue<'a> {}
+unsafe impl<'a> Sync for RawValue<'a> {}
+
 impl<'a> fmt::Debug for RawValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.unpack().fmt(f)
     }
 }
 
-unsafe impl<'a> Send for RawValue<'a> {}
-unsafe impl<'a> Sync for RawValue<'a> {}
+impl<'a, 'b> cmp::PartialEq<RawValue<'b>> for RawValue<'a> {
+    fn eq(&self, other: &RawValue) -> bool {
+        if self.md != other.md {
+            false
+        } else {
+            self.unpack() == other.unpack()
+        }
+    }
+}
